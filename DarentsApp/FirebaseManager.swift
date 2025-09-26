@@ -40,6 +40,64 @@ class FirebaseManager: ObservableObject {
             Auth.auth().removeStateDidChangeListener(handle)
         }
     }
+
+    // MARK: - Household Management
+
+    func createHousehold(name: String, completion: @escaping (Error?) -> Void) {
+        guard let userId = currentUserId else {
+            completion(HouseholdError.notAuthenticated)
+            return
+        }
+
+        let newHouseholdRef = db.collection("households").document()
+        let household = Household(id: newHouseholdRef.documentID, name: name, ownerId: userId, memberIds: [userId])
+
+        let userRef = db.collection("users").document(userId)
+
+        // Use a batch write to perform both operations atomically.
+        let batch = db.batch()
+
+        do {
+            try batch.setData(from: household, forDocument: newHouseholdRef)
+            batch.updateData(["householdId": newHouseholdRef.documentID], forDocument: userRef)
+
+            batch.commit(completion: completion)
+        } catch {
+            completion(error)
+        }
+    }
+
+    func joinHousehold(householdId: String, completion: @escaping (Error?) -> Void) {
+        guard let userId = currentUserId else {
+            completion(HouseholdError.notAuthenticated)
+            return
+        }
+
+        let householdRef = db.collection("households").document(householdId)
+        let userRef = db.collection("users").document(userId)
+
+        let batch = db.batch()
+
+        // Add the user to the household's members array and update the user's profile.
+        batch.updateData(["memberIds": FieldValue.arrayUnion([userId])], forDocument: householdRef)
+        batch.updateData(["householdId": householdId], forDocument: userRef)
+
+        batch.commit(completion: completion)
+    }
+
+    enum HouseholdError: Error, LocalizedError {
+        case notAuthenticated
+        case householdNotFound
+
+        var errorDescription: String? {
+            switch self {
+            case .notAuthenticated:
+                return "You must be logged in to manage a household."
+            case .householdNotFound:
+                return "The specified household could not be found."
+            }
+        }
+    }
     
     func saveData(data: [String: Any], toCollection collection: String) {
             
@@ -161,45 +219,53 @@ class FirebaseManager: ObservableObject {
 
     // MARK: - Apple Authentication
     
-    /// Signs in with Apple using an authorization request.
-    func signInWithApple(request: ASAuthorizationAppleIDRequest, delegate: AppleSignInDelegate, completion: @escaping (Result<User, Error>) -> Void) {
+    /// Configures an Apple Sign-In request with a nonce.
+    func prepareAppleSignInRequest(_ request: ASAuthorizationAppleIDRequest) {
         request.requestedScopes = [.fullName, .email]
-        
-        // Generate a cryptographically-secure nonce for the request.
         let nonce = randomNonceString()
         request.nonce = sha256(nonce)
-        self.currentAppleSignInNonce = nonce
-        
-        let controller = ASAuthorizationController(authorizationRequests: [request])
-        controller.delegate = delegate
-        
-        delegate.onSignInComplete = { result in
-            switch result {
-            case .success(let credential):
-                Auth.auth().signIn(with: credential) { authResult, error in
-                    if let error = error {
-                        completion(.failure(error))
-                    } else if let user = authResult?.user {
-                        completion(.success(user))
-                    } else {
-                        completion(.failure(AppleSignInError.authenticationFailed))
-                    }
-                }
-            case .failure(let error):
-                completion(.failure(error))
-            }
+        self.currentAppleSignInNonce = nonce // Store the nonce for later verification.
+    }
+
+    /// Signs the user into Firebase with an Apple credential.
+    func signInWithApple(credential: ASAuthorizationAppleIDCredential) async throws -> User {
+        guard let appleIDToken = credential.identityToken,
+              let idTokenString = String(data: appleIDToken, encoding: .utf8) else {
+            throw AppleSignInError.tokenSerializationFailed
         }
         
-        controller.performRequests()
+        // Call the internal, testable function with the extracted token string.
+        return try await signInWithApple(idTokenString: idTokenString)
+    }
+
+    /// Internal function to sign in with an ID token string, allowing for testing.
+    internal func signInWithApple(idTokenString: String) async throws -> User {
+        guard let nonce = self.currentAppleSignInNonce else {
+            fatalError("Invalid state: A nonce must be generated for Apple Sign-In.")
+        }
+        
+        let firebaseCredential = OAuthProvider.credential(withProviderID: "apple.com",
+                                                      idToken: idTokenString,
+                                                      rawNonce: nonce)
+
+        let authResult = try await Auth.auth().signIn(with: firebaseCredential)
+        self.currentAppleSignInNonce = nil // Clear the nonce after a successful sign-in.
+        return authResult.user
     }
     
     enum AppleSignInError: Error, LocalizedError {
         case authenticationFailed
+        case missingIdentityToken
+        case tokenSerializationFailed
         
         var errorDescription: String? {
             switch self {
             case .authenticationFailed:
                 return "Apple authentication failed. Please try again."
+            case .missingIdentityToken:
+                return "Could not retrieve identity token from Apple credential."
+            case .tokenSerializationFailed:
+                return "Could not serialize Apple identity token."
             }
         }
     }
@@ -294,33 +360,46 @@ class FirebaseManager: ObservableObject {
         }
     }
     
-    /// Fetches the user and pet profiles from Firestore.
-    func fetchUserData(userId: String, completion: @escaping (UserProfile?, [PetProfile]?, Error?) -> Void) {
+    /// Updates the user's profile in Firestore.
+    func updateUserProfile(_ userProfile: UserProfile, completion: @escaping (Error?) -> Void) {
+        guard let userId = currentUserId else {
+            completion(NSError(domain: "com.darents.app", code: 401, userInfo: [NSLocalizedDescriptionKey: "User not authenticated."]))
+            return
+        }
+
         let userDocumentRef = db.collection("users").document(userId)
         
-        // 1. Fetch User Profile
-        userDocumentRef.getDocument(as: UserProfile.self) { result in
-            switch result {
-            case .success(let userProfile):
-                // 2. If user profile is found, fetch their pets
-                let petsCollectionRef = userDocumentRef.collection("pets")
-                petsCollectionRef.getDocuments { (querySnapshot, error) in
-                    if let error = error {
-                        completion(nil, nil, error)
-                        return
-                    }
-                    
-                    let petProfiles = querySnapshot?.documents.compactMap({ document -> PetProfile? in
-                        try? document.data(as: PetProfile.self)
-                    }) ?? []
-                    
-                    completion(userProfile, petProfiles, nil)
-                }
-                
-            case .failure(let error):
-                // Handle case where user profile might not exist or other error
-                completion(nil, nil, error)
+        do {
+            // Use setData with merge:true to update the document without overwriting other fields.
+            try userDocumentRef.setData(from: userProfile, merge: true, completion: completion)
+        } catch {
+            completion(error)
+        }
+    }
+
+    /// Fetches the user and pet profiles from Firestore asynchronously.
+    func fetchUserData(userId: String) async -> (userProfile: UserProfile?, petProfiles: [PetProfile]?) {
+        let userDocumentRef = db.collection("users").document(userId)
+
+        do {
+            // 1. Fetch User Profile. This will throw an error if the document doesn't exist.
+            let userProfile = try await userDocumentRef.getDocument(as: UserProfile.self)
+
+            // 2. If user profile is found, fetch their pets.
+            let petsCollectionRef = userDocumentRef.collection("pets")
+            let petQuerySnapshot = try await petsCollectionRef.getDocuments()
+
+            let petProfiles = petQuerySnapshot.documents.compactMap { document -> PetProfile? in
+                try? document.data(as: PetProfile.self)
             }
+
+            return (userProfile, petProfiles)
+
+        } catch {
+            // If the user profile doesn't exist or another error occurs, return nil.
+            // This is expected if it's a new user.
+            print("Could not fetch user data (this is normal for a new user): \(error.localizedDescription)")
+            return (nil, nil)
         }
     }
 }

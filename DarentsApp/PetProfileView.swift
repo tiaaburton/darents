@@ -22,6 +22,7 @@ struct UserProfile: Codable {
     var phoneNumber: String = ""
     var email: String = ""
     var homeAddress: String = ""
+    var householdId: String? = nil // The ID of the household the user belongs to
 }
 
 // PetProfile now conforms to Hashable and Codable
@@ -37,6 +38,8 @@ struct PetProfile: Identifiable, Hashable, Codable {
     var favoriteGame: String = ""
     var breeds: String = ""
     var bio: String = ""
+    var location: String = "" // New field for location
+    var preferences: String = "" // New field for preferences
     
     // To handle the selected photo from the PhotosPicker
     // These properties are excluded from Codable conformance as Image and PhotosPickerItem are not Codable.
@@ -46,7 +49,7 @@ struct PetProfile: Identifiable, Hashable, Codable {
 
     // We must define CodingKeys to explicitly include/exclude properties from the Codable process.
     enum CodingKeys: String, CodingKey {
-        case id, name, nickname, birthday, weight, gotchaDay, favoriteToy, favoriteSnack, favoriteGame, breeds, bio
+        case id, name, nickname, birthday, weight, gotchaDay, favoriteToy, favoriteSnack, favoriteGame, breeds, bio, location, preferences
     }
 
     // Implement hash(into:) to make PetProfile Hashable.

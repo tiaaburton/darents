@@ -27,37 +27,6 @@ class AppDelegate: NSObject, UIApplicationDelegate {
     }
 }
 
-// A new class to handle the ASAuthorizationControllerDelegate for Apple Sign-In
-class AppleSignInDelegate: NSObject, ASAuthorizationControllerDelegate {
-    var onSignInComplete: ((Result<AuthCredential, Error>) -> Void)?
-    
-    func authorizationController(controller: ASAuthorizationController, didCompleteWithAuthorization authorization: ASAuthorization) {
-        if let appleIDCredential = authorization.credential as? ASAuthorizationAppleIDCredential {
-            guard let nonce = FirebaseManager.shared.currentAppleSignInNonce else {
-                fatalError("Invalid state: A nonce must be generated for Apple Sign-In.")
-            }
-            guard let appleIDToken = appleIDCredential.identityToken else {
-                print("Unable to fetch identity token")
-                return
-            }
-            guard let idTokenString = String(data: appleIDToken, encoding: .utf8) else {
-                print("Unable to serialize token into string")
-                return
-            }
-            
-            let credential = OAuthProvider.credential(withProviderID: "apple.com",
-                                                      idToken: idTokenString,
-                                                      rawNonce: nonce)
-            onSignInComplete?(.success(credential))
-        }
-    }
-    
-    func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
-        onSignInComplete?(.failure(error))
-    }
-}
-
-
 @main
 struct DarentsApp: App {
     // Register the AppDelegate for Firebase setup.
@@ -92,45 +61,60 @@ struct DarentsApp: App {
 struct MainTabView: View {
     @EnvironmentObject var onboardingViewModel: OnboardingViewModel
     @EnvironmentObject var firebaseManager: FirebaseManager
+    @State private var isLoading = true // Add a state to track loading
 
     var body: some View {
-        TabView {
-            ContentView()
-                .tabItem {
-                    Label("Home", systemImage: "house")
-                }
+        // If data is loading, show a progress indicator. Otherwise, show the TabView.
+        if isLoading {
+            ProgressView("Loading...")
+                .onAppear(perform: loadData) // Load data when the view appears
+        } else {
+            TabView {
+                ContentView()
+                    .tabItem {
+                        Label("Home", systemImage: "house")
+                    }
 
-            ActivityView()
-                .tabItem {
-                    Label("Activity", systemImage: "pawprint.fill")
-                }
+                ActivityView()
+                    .tabItem {
+                        Label("Activity", systemImage: "pawprint.fill")
+                    }
 
-            OnboardingHostView()
-                .tabItem {
-                    Label("Pet Profile", systemImage: "pawprint.circle.fill")
-                }
-            
-            FeedView()
-                .tabItem {
-                    Label("Feed", systemImage: "rectangle.stack.fill")
-                }
+                OnboardingHostView()
+                    .tabItem {
+                        Label("Pet Profile", systemImage: "pawprint.circle.fill")
+                    }
 
-            SettingsView()
-                .tabItem {
-                    Label("Settings", systemImage: "gear")
+                FeedView()
+                    .tabItem {
+                        Label("Feed", systemImage: "rectangle.stack.fill")
+                    }
+
+                SettingsView()
+                    .tabItem {
+                        Label("Settings", systemImage: "gear")
+                    }
+            }
+            // This watches for changes in the authentication state (e.g., user logs out).
+            .onChange(of: firebaseManager.isAuthenticated) { isAuthenticated in
+                if !isAuthenticated {
+                    // If the user logs out, clear all local user and pet data.
+                    onboardingViewModel.clearUserData()
                 }
-        }
-        // When this view appears, if the user is authenticated, load their data.
-        .onAppear {
-            if firebaseManager.isAuthenticated, let userId = firebaseManager.currentUserId {
-                onboardingViewModel.loadUserData(userId: userId, firebaseManager: firebaseManager)
             }
         }
-        // This watches for changes in the authentication state (e.g., user logs out).
-        .onChange(of: firebaseManager.isAuthenticated) { isAuthenticated in
-            if !isAuthenticated {
-                // If the user logs out, clear all local user and pet data.
-                onboardingViewModel.clearUserData()
+    }
+
+    /// Loads user data asynchronously from a background thread.
+    private func loadData() {
+        // Use a Task to run the data loading asynchronously.
+        Task {
+            if firebaseManager.isAuthenticated, let userId = firebaseManager.currentUserId {
+                await onboardingViewModel.loadUserData(userId: userId, firebaseManager: firebaseManager)
+            }
+            // Once loading is complete, update the UI on the main thread.
+            DispatchQueue.main.async {
+                self.isLoading = false
             }
         }
     }

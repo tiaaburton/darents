@@ -73,8 +73,9 @@ class OnboardingViewModel: ObservableObject {
                 firebaseManager.saveData(data: petDictionary, toCollection: "pets")
             }
 
-            // Set isFinished to true after all save operations are initiated
+            // After saving, set the flag in UserDefaults and update the view model.
             DispatchQueue.main.async {
+                UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")
                 self.isFinished = true
             }
 
@@ -92,30 +93,23 @@ class OnboardingViewModel: ObservableObject {
 
     // MARK: - Load from Firestore
 
-    /// Loads user + pet data from Firestore into this view model.
-    /// - Parameters:
-    ///   - userId: The Firebase user id to load data for
-    ///   - firebaseManager: The shared Firebase manager used to perform the fetch
-    func loadUserData(userId: String, firebaseManager: FirebaseManager) {
-        firebaseManager.fetchUserData(userId: userId) { [weak self] fetchedUser, fetchedPets, error in
-            DispatchQueue.main.async {
-                if let error = error {
-                    print("Error fetching user data: \(error.localizedDescription)")
-                    // You may want to expose an error message on the view model.
-                    return
-                }
+    /// Loads user + pet data asynchronously from Firestore into this view model.
+    @MainActor
+    func loadUserData(userId: String, firebaseManager: FirebaseManager) async {
+        let (fetchedUser, fetchedPets) = await firebaseManager.fetchUserData(userId: userId)
 
-                if let fetchedUser = fetchedUser {
-                    self?.userProfile = fetchedUser
-                }
-                if let fetchedPets = fetchedPets {
-                    self?.petProfiles = fetchedPets
-                }
-
-                // Update completion state
-                self?.isFinished = self?.hasCompletedOnboarding ?? false
-            }
+        if let fetchedUser = fetchedUser {
+            self.userProfile = fetchedUser
         }
+        if let fetchedPets = fetchedPets {
+            self.petProfiles = fetchedPets
+        }
+
+        // Use UserDefaults to check if onboarding has been completed.
+        // This is more reliable than checking if the profile is empty,
+        // as a user might not have filled out their profile completely.
+        let hasOnboarded = UserDefaults.standard.bool(forKey: "hasCompletedOnboarding")
+        self.isFinished = hasOnboarded || self.hasCompletedOnboarding
     }
 }
 
@@ -314,6 +308,8 @@ struct PetProfileFormSection: View {
                 TextField("Breed(s)", text: $pet.breeds)
                 DatePicker("Birthday", selection: $pet.birthday, displayedComponents: .date)
                 TextField("Weight (e.g., 75 lbs)", text: $pet.weight)
+                TextField("Location", text: $pet.location) // New field for location
+                TextField("Preferences", text: $pet.preferences) // New field for preferences
                 TextField("Favorite Toy", text: $pet.favoriteToy)
                 TextField("Favorite Snack", text: $pet.favoriteSnack)
                 TextField("Favorite Game", text: $pet.favoriteGame)
@@ -381,6 +377,10 @@ struct EditableDogProfileView: View {
                     DetailRow(icon: "calendar", label: "Birthday", value: pet.birthday.formatted(date: .abbreviated, time: .omitted))
                     Divider()
                     DetailRow(icon: "scalemass.fill", label: "Weight", value: pet.weight.isEmpty ? "N/A" : pet.weight)
+                    Divider()
+                    DetailRow(icon: "mappin.and.ellipse", label: "Location", value: pet.location.isEmpty ? "N/A" : pet.location)
+                    Divider()
+                    DetailRow(icon: "star.fill", label: "Preferences", value: pet.preferences.isEmpty ? "N/A" : pet.preferences)
                     Divider()
                     Group {
                         DetailRow(icon: "heart.fill", label: "Favorite Toy", value: pet.favoriteToy.isEmpty ? "N/A" : pet.favoriteToy)

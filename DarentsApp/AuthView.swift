@@ -17,9 +17,6 @@ struct AuthView: View {
     @State private var password = ""
     @State private var isLoginMode = true // true for Login, false for Sign Up
     
-    // Delegate to handle the Apple Sign-In flow.
-    @State private var appleSignInDelegate = AppleSignInDelegate()
-    
     var body: some View {
         NavigationView {
             ScrollView {
@@ -93,18 +90,15 @@ struct AuthView: View {
                         .continue,
                         onRequest: { request in
                             // This is called when the button is tapped.
-                            firebaseManager.signInWithApple(request: request, delegate: appleSignInDelegate) { result in
-                                switch result {
-                                case .success(_):
-                                    print("Apple Sign-In successful!")
-                                case .failure(let error):
-                                    firebaseManager.errorMessage = error.localizedDescription
-                                }
-                            }
+                            // We configure the request with a nonce from the FirebaseManager.
+                            firebaseManager.prepareAppleSignInRequest(request)
                         },
                         onCompletion: { result in
-                            // The completion is handled by our delegate, not here directly.
-                            // We do this to decouple the view from the delegate logic.
+                            // The onCompletion closure gives us the result of the Apple Sign-In flow.
+                            // We'll handle it in a separate async function.
+                            Task {
+                                await handleAppleSignIn(result: result)
+                            }
                         }
                     )
                     .signInWithAppleButtonStyle(.black)
@@ -140,6 +134,32 @@ struct AuthView: View {
         }
     }
     
+    /// Handles the result of the Apple Sign-In flow.
+    private func handleAppleSignIn(result: Result<ASAuthorization, Error>) async {
+        do {
+            switch result {
+            case .success(let authorization):
+                // Handle the successful authorization.
+                guard let appleIDCredential = authorization.credential as? ASAuthorizationAppleIDCredential else {
+                    // Use a local error type, since FirebaseManager's is not accessible here.
+                    throw NSError(domain: "com.darents.app", code: -1, userInfo: [NSLocalizedDescriptionKey: "Could not cast to Apple ID Credential."])
+                }
+
+                // Call the async sign-in function from the FirebaseManager.
+                _ = try await firebaseManager.signInWithApple(credential: appleIDCredential)
+
+            case .failure(let error):
+                // Handle the failure from the Apple Sign-In flow.
+                throw error
+            }
+        } catch {
+            // Update the UI with any error messages.
+            DispatchQueue.main.async {
+                firebaseManager.errorMessage = error.localizedDescription
+            }
+        }
+    }
+
     // A helper function to get the root view controller for presenting the Google Sign-In sheet.
     private func getRootViewController() -> UIViewController {
         guard let screen = UIApplication.shared.connectedScenes.first as? UIWindowScene else {
